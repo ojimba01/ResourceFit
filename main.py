@@ -499,4 +499,4 @@ if __name__ == '__main__':
     cheapest_instance = ec2_data.sort_values(by='priceMonthly').head(1)
 
     # Display the cheapest instance along with the relevant columns
-    print(cheapest_instance[['Instance Type', 'Memory', 'vCPU', 'Storage', 'priceMonthly']])
+    # print(cheapest_instance[['Instance Type', 'Memory', 'vCPU', 'Storage', 'priceMonthly']])
