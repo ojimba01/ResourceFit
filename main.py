@@ -380,16 +380,28 @@ def filter_ec2_instances(ec2_data, normalized_stats, total_disk_required_gb):
     # Drop rows with NaN values in 'Memory', 'vCPU', or 'Disk Space'
     ec2_data = ec2_data.dropna(subset=['Memory', 'vCPU', 'Disk Space'])
 
-    # Define the minimum memory required based on normalized stats
-    required_memory_gib = normalized_stats['mem_usage_gib']
+    # Define minimum requirements for memory and CPU (buffered memory already applied)
+    min_memory_gib = max(normalized_stats['mem_usage_gib'], 0.2)  # Ensure at least 0.2 GiB minimum
+    cpu_buffer = max(normalized_stats['cpu_usage_vcpus'], 1)  # Ensure at least 1 vCPU
 
     # First filter by memory and CPU
-    # Only recommend instances where memory usage is between 50-100% of instance capacity
     filtered_instances = ec2_data[
-        (ec2_data['Memory'] >= max(0.2, required_memory_gib / 2)) &  # Memory must allow usage between 50-100%
-        (ec2_data['Memory'] <= required_memory_gib) &                # Cap instance size to not overshoot by too much
-        (ec2_data['vCPU'] >= max(normalized_stats['cpu_usage_vcpus'], 1))  # Ensure at least 1 vCPU
+        (ec2_data['Memory'] >= min_memory_gib) &
+        (ec2_data['vCPU'] >= cpu_buffer)
     ]
+
+    # Check memory utilization: if memory usage is above 50%, select larger instances
+    memory_utilization = (normalized_stats['mem_usage_gib'] / min_memory_gib) * 100
+    if memory_utilization > 50:
+        click.echo(f"Memory utilization is above 50% ({memory_utilization:.2f}%), increasing the memory requirement.")
+        min_memory_gib *= 1.5  # Increase memory requirement by 50%
+
+        # Re-filter with the increased memory requirement
+        filtered_instances = ec2_data[
+            (ec2_data['Memory'] >= min_memory_gib) &
+            (ec2_data['vCPU'] >= cpu_buffer)
+        ]
+
     print(f"First filter (Memory & vCPU with 50-100% usage): {filtered_instances}")
 
     # Define disk space filtering thresholds
@@ -408,8 +420,8 @@ def filter_ec2_instances(ec2_data, normalized_stats, total_disk_required_gb):
         print("No instances found. Increasing disk space tolerance.")
         relaxed_disk_space = total_disk_required_gb * 10  # Increase the disk space tolerance
         filtered_instances = ec2_data[
-            (ec2_data['Memory'] >= max(0.2, required_memory_gib / 2)) &
-            (ec2_data['Memory'] <= required_memory_gib) &
+            (ec2_data['Memory'] >= min_memory_gib) &
+            (ec2_data['vCPU'] >= cpu_buffer) &
             (filtered_instances['Disk Space'] <= relaxed_disk_space) |
             (filtered_instances['Storage'].str.contains('EBS only', na=False))
         ]
@@ -421,6 +433,8 @@ def filter_ec2_instances(ec2_data, normalized_stats, total_disk_required_gb):
         filtered_instances = ec2_data.sort_values(by='priceMonthly').head(3)
 
     return filtered_instances
+
+
 
 def sort_by_cost(filtered_instances):
     """Sort EC2 instances by monthly price"""
