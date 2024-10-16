@@ -61,10 +61,11 @@ def list_containers():
         return []
 
 def display_container_options(containers):
-    """Display running containers for selection."""
+    """Display running containers for selection with their associated image tags."""
     click.echo("\nSelect a container to analyze:")
     for i, container in enumerate(containers):
-        click.echo(f"{i + 1}. {container.name} (ID: {container.id[:12]})")
+        image_tags = container.image.tags if container.image.tags else ['<no tag>']
+        click.echo(f"{i + 1}. {container.name} (ID: {container.id[:12]}) - Image: {', '.join(image_tags)}")
 
     selection = click.prompt(
         "\nEnter the number of the container (default 1)", type=int, default=1
@@ -121,21 +122,20 @@ def get_container_stats(container_id):
 #         click.echo(f"Error fetching image size: {e}")
 #         return None
 
-def parse_docker_image_size(image_name):
+def parse_docker_image_size(image_name, image_tag='latest'):
     """
     Parse the size of a Docker image from the 'docker images' command output and return the size in GB.
 
     Parameters:
-    - image_name: The name of the Docker image (e.g., 'sample-app_v1.0')
+    - image_name: The name of the Docker image (e.g., 'sample-app')
+    - image_tag: The tag of the Docker image (e.g., 'latest')
 
     Returns:
     - The size of the image in GB (float), or None if the image is not found.
     """
     try:
         client = docker.from_env()
-
-        # Retrieve the image (assume latest if no tag is provided)
-        image = client.images.get(image_name)
+        image = client.images.get(f"{image_name}:{image_tag}")
 
         size_bytes = image.attrs['Size']
         return size_bytes / (1024 ** 3)  # Convert bytes to GB
@@ -440,73 +440,70 @@ def recommend_instance(container_stats, ec2_data, container_image_size_gb, ebs_p
 
 def analyze_and_recommend():
     """Analyze container stats and recommend AWS instances."""
-    # Step 1: List and select a Docker container
+    # Step 1: List all running containers
     containers = list_containers()
     if not containers:
         return
 
-    # Display options for containers
+    # Step 2: Display the container options and allow the user to select one
     selected_container_id = display_container_options(containers)
     click.echo(f"\nSelected Container ID: {selected_container_id}")
 
-    # Step 2: Get and display the container's stats
+    # Step 3: Get and display Docker container stats for the selected container
     container_stats = get_container_stats(selected_container_id)
     if container_stats:
         click.echo("\nDocker Container Stats:")
         for key, value in container_stats.items():
             click.echo(f"{key}: {value}")
-    else:
-        click.echo("Failed to retrieve container stats.")
-        return
 
-    # Step 3: Get and display the container's image size
-    image_name = next(
-        (container.image.tags[0].split(':')[0] for container in containers if container.id == selected_container_id),
-        None
-    )
-    if image_name:
-        click.echo(f"\nFetching size for image: {image_name}")
-        container_image_size_gb = parse_docker_image_size(image_name)
+    # Step 4: Extract the image name and tag from the selected container
+    selected_container = next((container for container in containers if container.id == selected_container_id), None)
+    if selected_container and selected_container.image.tags:
+        image_tag = selected_container.image.tags[0] if ':' in selected_container.image.tags[0] else 'latest'
+        image_name, image_tag = image_tag.split(':') if ':' in image_tag else (image_tag, 'latest')
+
+        click.echo(f"\nFetching size for image: {image_name}:{image_tag}")
+        container_image_size_gb = parse_docker_image_size(image_name, image_tag)
         if container_image_size_gb is not None:
             click.echo(f"Image Size: {container_image_size_gb:.2f} GB")
         else:
             click.echo("Failed to retrieve the image size.")
             return
-    else:
-        click.echo("Image name not found.")
-        return
 
-    # Step 4: Fetch EC2 pricing data from AWS
+    # Step 5: Fetch and display the host machine data (CPU, memory, disk, network)
+    host_cpu = get_host_cpu_info()
+    host_memory = get_host_memory_info()
+    host_disk = get_host_disk_info()
+    host_network = get_host_network_info()
+
+    click.echo("\nHost Machine Data:")
+    click.echo(f"CPU Info: {host_cpu}")
+    click.echo(f"Memory Info: {host_memory}")
+    click.echo(f"Disk Info: {host_disk}")
+    click.echo(f"Network Info: {host_network}")
+
+    # Step 6: Fetch AWS EC2 pricing data
     click.echo("\nFetching AWS EC2 pricing data...")
-    region = 'US East (N. Virginia)'  # Example region
+    region = 'US East (N. Virginia)'
     ec2_data = fetch_aws_pricing_data(region)
-    if ec2_data is None:
-        click.echo("Failed to fetch EC2 pricing data.")
-        return
 
-    # Step 5: Fetch and extract EBS pricing data
+    # Step 7: Fetch and extract EBS pricing data
     click.echo("\nFetching EBS pricing data...")
     raw_pricing_data = fetch_ebs_pricing()
     ebs_pricing_data = extract_ebs_pricing(raw_pricing_data)
-    if not ebs_pricing_data:
-        click.echo("Failed to fetch or extract EBS pricing data.")
-        return
 
-    # Step 6: Normalize the Docker container stats
+    # Step 8: Normalize Docker container stats (memory and CPU)
     normalized_stats = normalize_docker_stats(container_stats)
 
-    # Step 7: Update the disk space and pricing for EBS-only instances
+    # Step 9: Update disk space and pricing for EBS-only instances
     ec2_data = update_disk_space_with_ebs(ec2_data, ebs_pricing_data, container_image_size_gb)
 
-    # Step 8: Recommend EC2 instances based on Docker stats and image size
+    # Step 10: Recommend EC2 instance based on Docker stats and image size
     recommended_instances = recommend_instance(container_stats, ec2_data, container_image_size_gb, ebs_pricing_data)
 
-    # Step 9: Display the top 3 EC2 instance recommendations
-    if recommended_instances.empty:
-        click.echo("No suitable EC2 instances found for the container.")
-    else:
-        click.echo("\nTop 3 EC2 Instance Recommendations:")
-        click.echo(recommended_instances[['Instance Type', 'Memory', 'vCPU', 'Storage', 'priceMonthly']])
+    # Step 11: Display the top 3 EC2 instance recommendations
+    click.echo("\nTop 3 EC2 Instance Recommendations:")
+    click.echo(recommended_instances[['Instance Type', 'Memory', 'vCPU', 'Storage', 'priceMonthly']])
 
 if __name__ == '__main__':
     analyze_and_recommend()
