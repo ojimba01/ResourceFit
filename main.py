@@ -256,7 +256,7 @@ def update_disk_space_with_ebs(ec2_data, ebs_pricing, container_image_size_gb):
     return ec2_data
 
 
-def fetch_aws_pricing_data(region):
+def fetch_aws_pricing_data(region='US East (N. Virginia)'):
     """
     Fetches EC2 instance pricing data for both Linux and Windows instances from AWS Pricing API
     for the specified region, and returns the data as a Pandas DataFrame.
@@ -304,7 +304,6 @@ def fetch_aws_pricing_data(region):
     return df
 def normalize_docker_stats(container_stats, memory_buffer_factor=1.5):
     """Convert Docker container stats into comparable values, applying a buffer for memory."""
-
     # Extract only the memory usage (before the '/')
     mem_usage_str = container_stats['mem_usage'].split('/')[0].strip()
 
@@ -319,13 +318,16 @@ def normalize_docker_stats(container_stats, memory_buffer_factor=1.5):
     # Apply the memory buffer (e.g., 1.5 means 50% more memory buffer)
     required_memory_gb = mem_usage_gb * memory_buffer_factor
 
+    # Ensure that the normalized memory is at least 0.2 GiB (minimum instance size)
+    required_memory_gb = max(required_memory_gb, 0.2)
+
     # Calculate the CPU usage in vCPUs
     cpu_usage_percentage = float(container_stats['cpu_usage'].replace('%', '').strip())
     cpu_count = psutil.cpu_count(logical=True)
     cpu_usage_vcpus = (cpu_usage_percentage / 100.0) * cpu_count  # Estimate vCPUs needed
 
     return {
-        'mem_usage_gib': required_memory_gb,  # Use the buffered memory requirement
+        'mem_usage_gib': required_memory_gb,  # Use the buffered memory requirement with a minimum of 0.2 GiB
         'cpu_usage_vcpus': cpu_usage_vcpus
     }
 
@@ -378,16 +380,17 @@ def filter_ec2_instances(ec2_data, normalized_stats, total_disk_required_gb):
     # Drop rows with NaN values in 'Memory', 'vCPU', or 'Disk Space'
     ec2_data = ec2_data.dropna(subset=['Memory', 'vCPU', 'Disk Space'])
 
-    # Define minimum requirements for memory and CPU (buffered memory already applied)
-    min_memory_gib = max(normalized_stats['mem_usage_gib'], 0.2)  # Ensure at least 0.2 GiB minimum
-    cpu_buffer = max(normalized_stats['cpu_usage_vcpus'], 1)  # Ensure at least 1 vCPU
+    # Define the minimum memory required based on normalized stats
+    required_memory_gib = normalized_stats['mem_usage_gib']
 
     # First filter by memory and CPU
+    # Only recommend instances where memory usage is between 50-100% of instance capacity
     filtered_instances = ec2_data[
-        (ec2_data['Memory'] >= min_memory_gib) &
-        (ec2_data['vCPU'] >= cpu_buffer)
+        (ec2_data['Memory'] >= max(0.2, required_memory_gib / 2)) &  # Memory must allow usage between 50-100%
+        (ec2_data['Memory'] <= required_memory_gib) &                # Cap instance size to not overshoot by too much
+        (ec2_data['vCPU'] >= max(normalized_stats['cpu_usage_vcpus'], 1))  # Ensure at least 1 vCPU
     ]
-    print(f"First filter (Memory & vCPU): {filtered_instances}")
+    print(f"First filter (Memory & vCPU with 50-100% usage): {filtered_instances}")
 
     # Define disk space filtering thresholds
     disk_space_threshold = total_disk_required_gb * 5  # Allow 5x the required disk space as a threshold
@@ -405,8 +408,8 @@ def filter_ec2_instances(ec2_data, normalized_stats, total_disk_required_gb):
         print("No instances found. Increasing disk space tolerance.")
         relaxed_disk_space = total_disk_required_gb * 10  # Increase the disk space tolerance
         filtered_instances = ec2_data[
-            (ec2_data['Memory'] >= min_memory_gib) &
-            (ec2_data['vCPU'] >= cpu_buffer) &
+            (ec2_data['Memory'] >= max(0.2, required_memory_gib / 2)) &
+            (ec2_data['Memory'] <= required_memory_gib) &
             (filtered_instances['Disk Space'] <= relaxed_disk_space) |
             (filtered_instances['Storage'].str.contains('EBS only', na=False))
         ]
@@ -418,7 +421,6 @@ def filter_ec2_instances(ec2_data, normalized_stats, total_disk_required_gb):
         filtered_instances = ec2_data.sort_values(by='priceMonthly').head(3)
 
     return filtered_instances
-
 
 def sort_by_cost(filtered_instances):
     """Sort EC2 instances by monthly price"""
@@ -485,7 +487,7 @@ def analyze_and_recommend():
     # Step 5: Fetch AWS EC2 pricing data
     click.echo("\nFetching AWS EC2 pricing data...")
     region = 'US East (N. Virginia)'  # You can make this configurable if needed
-    ec2_data = fetch_aws_pricing_data(region)
+    ec2_data = fetch_aws_pricing_data()
 
     # Step 6: Fetch AWS EBS pricing data
     click.echo("\nFetching EBS pricing data...")
@@ -503,8 +505,11 @@ def analyze_and_recommend():
     recommended_instances = recommend_instance(container_stats, ec2_data, container_image_size_gb, ebs_pricing_data)
 
     # Step 10: Output the top 3 EC2 instance recommendations
-    click.echo("\nTop 3 EC2 Instance Recommendations:")
-    click.echo(recommended_instances[['Instance Type', 'Memory', 'vCPU', 'Storage', 'priceMonthly']])
+    if not recommended_instances.empty:
+        click.echo("\nTop 3 EC2 Instance Recommendations:")
+        click.echo(recommended_instances[['Instance Type', 'Memory', 'vCPU', 'Storage', 'priceMonthly']])
+    else:
+        click.echo("No EC2 instances could be recommended based on the container stats.")
 
 if __name__ == '__main__':
     analyze_and_recommend()
