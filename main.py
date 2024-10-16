@@ -100,26 +100,49 @@ def get_container_stats(container_id):
         click.echo(f"Error fetching stats: {e}")
         return {}
 
-def parse_docker_image_size(image_name, image_tag='latest'):
+# def parse_docker_image_size(image_name, image_tag='latest'):
+#     """
+#     Parse the size of a Docker image from the 'docker images' command output and return the size in GB.
+
+#     Parameters:
+#     - image_name: The name of the Docker image (e.g., 'sample-app_v1.0')
+#     - image_tag: The tag of the Docker image (default is 'latest')
+
+#     Returns:
+#     - The size of the image in GB (float), or None if the image is not found.
+#     """
+#     try:
+#         client = docker.from_env()
+#         image = client.images.get(f"{image_name}:{image_tag}")
+
+#         size_bytes = image.attrs['Size']
+#         return size_bytes / (1024 ** 3)
+#     except (docker.errors.ImageNotFound, docker.errors.APIError) as e:
+#         click.echo(f"Error fetching image size: {e}")
+#         return None
+
+def parse_docker_image_size(image_name):
     """
     Parse the size of a Docker image from the 'docker images' command output and return the size in GB.
 
     Parameters:
     - image_name: The name of the Docker image (e.g., 'sample-app_v1.0')
-    - image_tag: The tag of the Docker image (default is 'latest')
 
     Returns:
     - The size of the image in GB (float), or None if the image is not found.
     """
     try:
         client = docker.from_env()
-        image = client.images.get(f"{image_name}:{image_tag}")
+
+        # Retrieve the image (assume latest if no tag is provided)
+        image = client.images.get(image_name)
 
         size_bytes = image.attrs['Size']
-        return size_bytes / (1024 ** 3)
+        return size_bytes / (1024 ** 3)  # Convert bytes to GB
     except (docker.errors.ImageNotFound, docker.errors.APIError) as e:
         click.echo(f"Error fetching image size: {e}")
         return None
+
 
 def convert_size_to_gb(size_str):
     """
