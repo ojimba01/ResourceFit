@@ -4,6 +4,8 @@ import pandas as pd
 import requests
 import json
 import re
+import click
+import docker
 
 ############################
 # 1. Host Machine Data Collection
@@ -34,61 +36,70 @@ def get_host_network_info():
 # 2. Docker Container Stats Collection Using Subprocess
 ############################
 
+def calculate_cpu_percentage(stats):
+    """Calculate CPU usage percentage from Docker stats."""
+    cpu_delta = stats['cpu_stats']['cpu_usage']['total_usage'] - stats['precpu_stats']['cpu_usage']['total_usage']
+    system_delta = stats['cpu_stats']['system_cpu_usage'] - stats['precpu_stats']['system_cpu_usage']
+
+    if system_delta > 0 and cpu_delta > 0:
+        return round((cpu_delta / system_delta) * 100.0, 2)
+    return 0.0
+
 def list_containers():
-    """List all running containers using 'docker ps'"""
+    """List all running containers using Docker SDK."""
     try:
-        result = subprocess.run(['docker', 'ps'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        client = docker.from_env()
+        containers = client.containers.list()
 
-        if result.returncode != 0:
-            print(f"Error running 'docker ps': {result.stderr}")
+        if not containers:
+            click.echo("No running containers found.")
             return []
 
-        output = result.stdout.strip()
-        if not output:
-            print("No running containers found.")
-            return []
-        else:
-            print("Running containers:")
-            print(output)
-            return output.splitlines()[1:]  # Skip the header line
-    except Exception as e:
-        print(f"Error occurred: {e}")
+        return containers
+    except docker.errors.DockerException as e:
+        click.echo(f"Error accessing Docker: {e}")
         return []
 
+def display_container_options(containers):
+    """Display running containers for selection."""
+    click.echo("\nSelect a container to analyze:")
+    for i, container in enumerate(containers):
+        click.echo(f"{i + 1}. {container.name} (ID: {container.id[:12]})")
+
+    selection = click.prompt(
+        "\nEnter the number of the container (default 1)", type=int, default=1
+    )
+
+    if 1 <= selection <= len(containers):
+        return containers[selection - 1].id
+    else:
+        click.echo("Invalid selection. Defaulting to the first container.")
+        return containers[0].id
+
 def get_container_stats(container_id):
-    """Get stats of a specific Docker container using 'docker stats --no-stream'"""
+    """Fetch real-time stats for a specific container."""
     try:
-        result = subprocess.run(['docker', 'stats', '--no-stream', container_id], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        client = docker.from_env()
+        container = client.containers.get(container_id)
+        stats = container.stats(stream=False)
 
-        if result.returncode != 0:
-            print(f"Error running 'docker stats' for container {container_id}: {result.stderr}")
-            return {}
-
-        output = result.stdout.strip().splitlines()
-        if len(output) < 2:
-            print(f"No stats found for container {container_id}")
-            return {}
-
-        stats_line = output[1]
-        stats = stats_line.split()
-
-        container_stats = {
-            'container_id': stats[0],  # CONTAINER ID
-            'name': stats[1],  # NAME
-            'cpu_usage': stats[2],  # CPU %
-            'mem_usage': stats[3],  # MEM USAGE (first value before "/")
-            'mem_limit': stats[5],  # MEM LIMIT (second value after "/")
-            'mem_percentage': stats[6],  # MEM %
-            'net_io_rx': stats[7],  # Network RX (before "/")
-            'net_io_tx': stats[9],  # Network TX (after "/")
-            'block_io_read': stats[10],  # Block I/O Read (before "/")
-            'block_io_write': stats[12],  # Block I/O Write (after "/")
-            'pids': stats[13]  # PIDs
+        return {
+            'container_id': container.id,
+            'name': container.name,
+            'cpu_usage': f"{calculate_cpu_percentage(stats)}%",
+            'mem_usage': f"{stats['memory_stats']['usage'] / (1024 ** 2):.2f} MiB / "
+                         f"{stats['memory_stats']['limit'] / (1024 ** 3):.2f} GiB",
+            'mem_percentage': (stats['memory_stats']['usage'] / stats['memory_stats']['limit']) * 100,
+            'net_io_rx': f"{stats['networks']['eth0']['rx_bytes'] / 1024:.2f} kB",
+            'net_io_tx': f"{stats['networks']['eth0']['tx_bytes'] / 1024:.2f} kB",
+            'block_io_read': f"{stats['blkio_stats']['io_service_bytes_recursive'][0]['value'] / (1024 ** 2):.2f} MB",
+            'block_io_write': f"{stats['blkio_stats']['io_service_bytes_recursive'][1]['value'] / (1024 ** 2):.2f} MB",
+            'pids': stats['pids_stats']['current']
         }
-        return container_stats
-    except Exception as e:
-        print(f"Error occurred: {e}")
+    except (docker.errors.NotFound, docker.errors.APIError) as e:
+        click.echo(f"Error fetching stats: {e}")
         return {}
+
 def parse_docker_image_size(image_name, image_tag='latest'):
     """
     Parse the size of a Docker image from the 'docker images' command output and return the size in GB.
@@ -101,33 +112,13 @@ def parse_docker_image_size(image_name, image_tag='latest'):
     - The size of the image in GB (float), or None if the image is not found.
     """
     try:
-        # Run 'docker images' command to get the list of images
-        result = subprocess.run(['docker', 'images'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        client = docker.from_env()
+        image = client.images.get(f"{image_name}:{image_tag}")
 
-        if result.returncode != 0:
-            print(f"Error running 'docker images': {result.stderr}")
-            return None
-
-        # Split the output into lines
-        output_lines = result.stdout.strip().splitlines()
-
-        # Loop through each line to find the image
-        for line in output_lines[1:]:  # Skip the header
-            if image_name in line and image_tag in line:
-                # The size is in the last column of the line
-                columns = line.split()
-                image_size_str = columns[-1]  # The size is typically the last column (e.g., '823MB')
-
-                # Convert the image size to GB
-                image_size_gb = convert_size_to_gb(image_size_str)
-                return image_size_gb
-
-        # If image is not found
-        print(f"Image {image_name}:{image_tag} not found.")
-        return None
-
-    except Exception as e:
-        print(f"Error occurred: {e}")
+        size_bytes = image.attrs['Size']
+        return size_bytes / (1024 ** 3)
+    except (docker.errors.ImageNotFound, docker.errors.APIError) as e:
+        click.echo(f"Error fetching image size: {e}")
         return None
 
 def convert_size_to_gb(size_str):
@@ -291,14 +282,18 @@ def fetch_aws_pricing_data(region):
 
 def normalize_docker_stats(container_stats):
     """Convert Docker container stats into comparable values."""
-    mem_usage_str = container_stats['mem_usage']
-    if 'MiB' in mem_usage_str:
-        mem_usage_gb = float(mem_usage_str.replace('MiB', '').strip()) / 1024.0  # Convert to GiB
-    elif 'GiB' in mem_usage_str:
-        mem_usage_gb = float(mem_usage_str.replace('GiB', '').strip())
-    else:
-        mem_usage_gb = float(mem_usage_str.strip()) / (1024.0 ** 2)  # Assume bytes, convert to GiB
+    # Extract only the memory usage (before the '/')
+    mem_usage_str = container_stats['mem_usage'].split('/')[0].strip()
 
+    # Convert memory usage to GiB
+    if 'MiB' in mem_usage_str:
+        mem_usage_gb = float(mem_usage_str.replace('MiB', '').strip()) / 1024.0  # Convert MiB to GiB
+    elif 'GiB' in mem_usage_str:
+        mem_usage_gb = float(mem_usage_str.replace('GiB', '').strip())  # Already in GiB
+    else:
+        mem_usage_gb = float(mem_usage_str.strip()) / (1024.0 ** 2)  # Assume bytes if no unit, convert to GiB
+
+    # CPU usage remains unchanged
     cpu_usage_percentage = float(container_stats['cpu_usage'].replace('%', '').strip())
     cpu_count = psutil.cpu_count(logical=True)
     cpu_usage_vcpus = (cpu_usage_percentage / 100.0) * cpu_count  # Estimate vCPUs needed
@@ -324,75 +319,71 @@ def parse_vcpu(vcpu_str):
 def parse_disk_space(storage_str):
     """Parse the storage string into GB."""
     if "EBS only" in storage_str:
-        # Assume EBS only means no local storage, we may choose to set this as 0 or skip it.
+        # Assume EBS only means no local storage.
         return 0.0
 
+    # Match formats like "2 x 1425 NVMe SSD" or "1 x 950 NVMe SSD"
     match = re.search(r'(\d+)\s*x\s*(\d+)', storage_str)
     if match:
-        # The storage format is like "1 x 950 NVMe SSD", so multiply the two numbers
         num_disks = int(match.group(1))
         size_per_disk_gb = int(match.group(2))
         return num_disks * size_per_disk_gb
-    else:
-        return None
+
+    # Match single disk sizes like "900 GB NVMe SSD"
+    match_single = re.search(r'(\d+)\s*GB', storage_str)
+    if match_single:
+        return float(match_single.group(1))
+
+    # If no match, return None or 0 based on your needs
+    return None
 
 def filter_ec2_instances(ec2_data, normalized_stats, total_disk_required_gb):
-    """Filter EC2 instances based on Docker container stats and required disk space"""
-    # Make a copy to avoid modifying the original DataFrame
+    """Filter EC2 instances based on Docker container stats and required disk space."""
     ec2_data = ec2_data.copy()
 
-    # Ensure 'Memory', 'vCPU', and 'Storage' columns are numeric
     ec2_data['Memory'] = ec2_data['Memory'].apply(parse_memory)
     ec2_data['vCPU'] = ec2_data['vCPU'].apply(parse_vcpu)
-    ec2_data['Disk Space'] = ec2_data['Storage'].apply(parse_disk_space)  # Use 'Storage' column for disk space
+    ec2_data['Disk Space'] = ec2_data['Storage'].apply(parse_disk_space)
 
-    # Drop rows with NaN values in 'Memory', 'vCPU', or 'Disk Space'
     ec2_data = ec2_data.dropna(subset=['Memory', 'vCPU', 'Disk Space'])
 
-    # Minimum memory requirement
-    min_memory_gib = .2  # Set a minimum memory requirement
+    min_memory_gib = 0.2  # Minimum memory
+    cpu_buffer = 1  # Minimum 1 vCPU
 
-
-    # Filter based on memory and vCPU
-    filtered_instances = ec2_data[
-        (ec2_data['Memory'] >= max(normalized_stats['mem_usage_gib'], min_memory_gib)) &
-        (ec2_data['vCPU'] >= normalized_stats['cpu_usage_vcpus'])
-    ]
-
-    # Set a minimum CPU buffer to avoid too-low vCPU instances
-    cpu_buffer = 1  # Ensure at least 1 vCPU
+    # Filter by memory and CPU
     filtered_instances = ec2_data[
         (ec2_data['Memory'] >= max(normalized_stats['mem_usage_gib'], min_memory_gib)) &
         (ec2_data['vCPU'] >= max(normalized_stats['cpu_usage_vcpus'], cpu_buffer))
     ]
+    print(f"First filter (Memory & vCPU): {filtered_instances}")
 
-
-
-    # Now filter by disk space with a relaxed threshold
-    disk_space_threshold = total_disk_required_gb * 5  # Allow up to 5x the required disk space
+    # Filter by disk space and allow EBS-only instances
+    disk_space_threshold = total_disk_required_gb * 5
     filtered_instances = filtered_instances[
-        (filtered_instances['Disk Space'] >= total_disk_required_gb) &
-        (filtered_instances['Disk Space'] <= disk_space_threshold)  # Avoid excessive disk space
+        ((filtered_instances['Disk Space'] >= total_disk_required_gb) &
+         (filtered_instances['Disk Space'] <= disk_space_threshold)) |
+        (filtered_instances['Storage'].str.contains('EBS only', na=False))
     ]
+    print(f"Second filter (Disk Space & EBS-only): {filtered_instances}")
 
-    # Set a minimum disk space requirement
-    min_disk_space_gb = 5.0  # Minimum 5 GB disk space
-    filtered_instances = filtered_instances[
-        (filtered_instances['Disk Space'] >= max(total_disk_required_gb, min_disk_space_gb)) &
-        (filtered_instances['Disk Space'] <= disk_space_threshold)  # Avoid excessive disk space
-    ]
-
-
-    # If no instances are found, return results with just memory and vCPU filtering
+    # Incremental relaxation if no matches found
     if filtered_instances.empty:
-        print("No instances found with exact disk space. Relaxing disk space filter.")
+        print("No instances found. Increasing disk space tolerance.")
+        relaxed_disk_space = total_disk_required_gb * 10
         filtered_instances = ec2_data[
             (ec2_data['Memory'] >= max(normalized_stats['mem_usage_gib'], min_memory_gib)) &
-            (ec2_data['vCPU'] >= normalized_stats['cpu_usage_vcpus'])
+            (ec2_data['vCPU'] >= max(normalized_stats['cpu_usage_vcpus'], cpu_buffer)) &
+            (filtered_instances['Disk Space'] <= relaxed_disk_space) |
+            (filtered_instances['Storage'].str.contains('EBS only', na=False))
         ]
+    print(f"Third filter (Relaxed Disk Space): {filtered_instances}")
+
+    # Fallback strategy if still empty
+    if filtered_instances.empty:
+        print("Warning: No suitable instances found. Using fallback.")
+        filtered_instances = ec2_data.sort_values(by='priceMonthly').head(3)
 
     return filtered_instances
-
 
 def sort_by_cost(filtered_instances):
     """Sort EC2 instances by monthly price"""
@@ -420,83 +411,79 @@ def recommend_instance(container_stats, ec2_data, container_image_size_gb, ebs_p
 
     return sorted_instances.head(3)
 
-
 ############################
 # Usage
 ############################
 
-if __name__ == '__main__':
-    # Fetch EC2 instance data from AWS
-    region = 'US East (N. Virginia)'
-    ec2_data = fetch_aws_pricing_data(region)
-
-    # Fetch and extract EBS pricing data
-    raw_pricing_data = fetch_ebs_pricing()
-    print("Available columns in EC2 Data:")
-    print(ec2_data.columns)
-
-
-    ebs_pricing_data = extract_ebs_pricing(raw_pricing_data)
-    # Add this after updating the disk space in the main execution flow
-    print("\nEC2 Data with EBS Pricing (Updated for EBS-only Instances):")
-    print(ec2_data[['Instance Type', 'Memory', 'vCPU', 'Storage', 'priceMonthly']])
-
-
-
-    # List all running containers
+def analyze_and_recommend():
+    """Analyze container stats and recommend AWS instances."""
+    # Step 1: List and select a Docker container
     containers = list_containers()
+    if not containers:
+        return
 
-    if containers:
-        container_id = containers[0].split()[0]  # Assuming first container's ID is on the first word
-        image_name = containers[0].split()[1]  # Assuming second word is the image name
-        print(f"Selected Container ID: {container_id}")
-        print(f"Selected Image: {image_name}")
+    # Display options for containers
+    selected_container_id = display_container_options(containers)
+    click.echo(f"\nSelected Container ID: {selected_container_id}")
 
-        # Get host machine data
-        host_cpu = get_host_cpu_info()
-        host_memory = get_host_memory_info()
-        host_disk = get_host_disk_info()
-        host_network = get_host_network_info()
-
-        print("\nHost Machine Data:")
-        print(f"CPU Info: {host_cpu}")
-        print(f"Memory Info: {host_memory}")
-        print(f"Disk Info: {host_disk}")
-        print(f"Network Info: {host_network}")
-
-        # Get Docker container stats
-        container_stats = get_container_stats(container_id)
-
-        if container_stats:
-            print("\nDocker Container Stats:")
-            print(f"Container ID: {container_stats['container_id']}")
-            print(f"Name: {container_stats['name']}")
-            print(f"CPU Usage: {container_stats['cpu_usage']}")
-            print(f"Memory Usage: {container_stats['mem_usage']} / {container_stats['mem_limit']}")
-            print(f"Memory Percentage: {container_stats['mem_percentage']}")
-            print(f"Network I/O: RX {container_stats['net_io_rx']} / TX {container_stats['net_io_tx']}")
-            print(f"Block I/O: Read {container_stats['block_io_read']} / Write {container_stats['block_io_write']}")
-            print(f"PIDs: {container_stats['pids']}")
-
-            # Parse the Docker image size
-            container_image_size_gb = parse_docker_image_size(image_name)
-            if container_image_size_gb:
-
-                print(f"Container Image Size (GB): {container_image_size_gb}")
-                ec2_data = update_disk_space_with_ebs(ec2_data, ebs_pricing_data, container_image_size_gb)
-
-                # Recommend EC2 instance based on Docker stats and image size
-                recommended_instances = recommend_instance(container_stats, ec2_data, container_image_size_gb, ebs_pricing_data)
-                print("\nTop 3 EC2 Instance Recommendations:")
-                print(recommended_instances[['Instance Type', 'Memory', 'vCPU', 'Storage', 'priceMonthly']])
-            else:
-                print("Failed to retrieve the container image size.")
-        else:
-            print("No stats available for the selected container.")
+    # Step 2: Get and display the container's stats
+    container_stats = get_container_stats(selected_container_id)
+    if container_stats:
+        click.echo("\nDocker Container Stats:")
+        for key, value in container_stats.items():
+            click.echo(f"{key}: {value}")
     else:
-        print("No containers to monitor.")
-    # Sort the DataFrame by priceMonthly to get the cheapest instance
-    cheapest_instance = ec2_data.sort_values(by='priceMonthly').head(1)
+        click.echo("Failed to retrieve container stats.")
+        return
 
-    # Display the cheapest instance along with the relevant columns
-    # print(cheapest_instance[['Instance Type', 'Memory', 'vCPU', 'Storage', 'priceMonthly']])
+    # Step 3: Get and display the container's image size
+    image_name = next(
+        (container.image.tags[0].split(':')[0] for container in containers if container.id == selected_container_id),
+        None
+    )
+    if image_name:
+        click.echo(f"\nFetching size for image: {image_name}")
+        container_image_size_gb = parse_docker_image_size(image_name)
+        if container_image_size_gb is not None:
+            click.echo(f"Image Size: {container_image_size_gb:.2f} GB")
+        else:
+            click.echo("Failed to retrieve the image size.")
+            return
+    else:
+        click.echo("Image name not found.")
+        return
+
+    # Step 4: Fetch EC2 pricing data from AWS
+    click.echo("\nFetching AWS EC2 pricing data...")
+    region = 'US East (N. Virginia)'  # Example region
+    ec2_data = fetch_aws_pricing_data(region)
+    if ec2_data is None:
+        click.echo("Failed to fetch EC2 pricing data.")
+        return
+
+    # Step 5: Fetch and extract EBS pricing data
+    click.echo("\nFetching EBS pricing data...")
+    raw_pricing_data = fetch_ebs_pricing()
+    ebs_pricing_data = extract_ebs_pricing(raw_pricing_data)
+    if not ebs_pricing_data:
+        click.echo("Failed to fetch or extract EBS pricing data.")
+        return
+
+    # Step 6: Normalize the Docker container stats
+    normalized_stats = normalize_docker_stats(container_stats)
+
+    # Step 7: Update the disk space and pricing for EBS-only instances
+    ec2_data = update_disk_space_with_ebs(ec2_data, ebs_pricing_data, container_image_size_gb)
+
+    # Step 8: Recommend EC2 instances based on Docker stats and image size
+    recommended_instances = recommend_instance(container_stats, ec2_data, container_image_size_gb, ebs_pricing_data)
+
+    # Step 9: Display the top 3 EC2 instance recommendations
+    if recommended_instances.empty:
+        click.echo("No suitable EC2 instances found for the container.")
+    else:
+        click.echo("\nTop 3 EC2 Instance Recommendations:")
+        click.echo(recommended_instances[['Instance Type', 'Memory', 'vCPU', 'Storage', 'priceMonthly']])
+
+if __name__ == '__main__':
+    analyze_and_recommend()
