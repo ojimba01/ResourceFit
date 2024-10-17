@@ -1,6 +1,6 @@
 Metadata-Version: 2.1
 Name: resourcefit
-Version: 0.1.0
+Version: 0.1.1
 Summary: CLI tool for analyzing Docker containers and recommending EC2 instances.
 Home-page: https://github.com/ojimba01/resourcefit
 Author: Olayinka Jimba
@@ -45,17 +45,16 @@ Requires-Dist: docker
 
 To install ResourceFit, follow the steps below:
 
-1. Clone the repository:
+1. Have python (version 3.9 and above) installed on your device, follow the link below to do this:
 
     ```bash
-    git clone https://github.com/yourusername/ResourceFit.git
-    cd ResourceFit
+    https://www.python.org/downloads/
     ```
 
-2. Install ResourceFit in editable mode:
+2. Install ResourceFit:
 
     ```bash
-    pip install -e .
+    pip install resourcefit
     ```
 
 ## Usage
