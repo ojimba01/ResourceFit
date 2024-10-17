@@ -36,15 +36,6 @@ def get_host_network_info():
 # 2. Docker Container Stats Collection Using Subprocess
 ############################
 
-def calculate_cpu_percentage(stats):
-    """Calculate CPU usage percentage from Docker stats."""
-    cpu_delta = stats['cpu_stats']['cpu_usage']['total_usage'] - stats['precpu_stats']['cpu_usage']['total_usage']
-    system_delta = stats['cpu_stats']['system_cpu_usage'] - stats['precpu_stats']['system_cpu_usage']
-
-    if system_delta > 0 and cpu_delta > 0:
-        return round((cpu_delta / system_delta) * 100.0, 2)
-    return 0.0
-
 def list_containers():
     """List all running containers using Docker SDK."""
     try:
@@ -77,6 +68,15 @@ def display_container_options(containers):
         click.echo("Invalid selection. Defaulting to the first container.")
         return containers[0].id
 
+def calculate_cpu_percentage(stats):
+    """Calculate CPU usage percentage from Docker stats."""
+    cpu_delta = stats['cpu_stats']['cpu_usage']['total_usage'] - stats['precpu_stats']['cpu_usage']['total_usage']
+    system_delta = stats['cpu_stats']['system_cpu_usage'] - stats['precpu_stats']['system_cpu_usage']
+
+    if system_delta > 0 and cpu_delta > 0:
+        return round((cpu_delta / system_delta) * 100.0, 2)
+    return 0.0
+
 def get_container_stats(container_id):
     """Fetch real-time stats for a specific container."""
     try:
@@ -101,27 +101,6 @@ def get_container_stats(container_id):
         click.echo(f"Error fetching stats: {e}")
         return {}
 
-# def parse_docker_image_size(image_name, image_tag='latest'):
-#     """
-#     Parse the size of a Docker image from the 'docker images' command output and return the size in GB.
-
-#     Parameters:
-#     - image_name: The name of the Docker image (e.g., 'sample-app_v1.0')
-#     - image_tag: The tag of the Docker image (default is 'latest')
-
-#     Returns:
-#     - The size of the image in GB (float), or None if the image is not found.
-#     """
-#     try:
-#         client = docker.from_env()
-#         image = client.images.get(f"{image_name}:{image_tag}")
-
-#         size_bytes = image.attrs['Size']
-#         return size_bytes / (1024 ** 3)
-#     except (docker.errors.ImageNotFound, docker.errors.APIError) as e:
-#         click.echo(f"Error fetching image size: {e}")
-#         return None
-
 def parse_docker_image_size(image_name, image_tag='latest'):
     """
     Parse the size of a Docker image from the 'docker images' command output and return the size in GB.
@@ -142,28 +121,6 @@ def parse_docker_image_size(image_name, image_tag='latest'):
     except (docker.errors.ImageNotFound, docker.errors.APIError) as e:
         click.echo(f"Error fetching image size: {e}")
         return None
-
-
-def convert_size_to_gb(size_str):
-    """
-    Convert a Docker image size string (e.g., '823MB', '1.2GB') to GB.
-
-    Parameters:
-    - size_str: A string representing the size (e.g., '823MB', '1.2GB').
-
-    Returns:
-    - The size in GB as a float.
-    """
-    size_str = size_str.strip().upper()
-
-    if 'GB' in size_str:
-        return float(size_str.replace('GB', '').strip())
-    elif 'MB' in size_str:
-        return float(size_str.replace('MB', '').strip()) / 1024  # Convert MB to GB
-    elif 'KB' in size_str:
-        return float(size_str.replace('KB', '').strip()) / (1024 ** 2)  # Convert KB to GB
-    else:
-        return float(size_str) / (1024 ** 3)  # Assume bytes if no unit is found
 
 
 ############################
