@@ -1,0 +1,2 @@
+[console_scripts]
+resourcefit = resourcefit.main:analyze_and_recommend
