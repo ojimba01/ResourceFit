@@ -1,6 +1,6 @@
 Metadata-Version: 2.1
 Name: resourcefit
-Version: 0.1.1
+Version: 0.1.2
 Summary: CLI tool for analyzing Docker containers and recommending EC2 instances.
 Home-page: https://github.com/ojimba01/resourcefit
 Author: Olayinka Jimba
@@ -20,7 +20,7 @@ Classifier: Programming Language :: Python :: 3.10
 Classifier: Programming Language :: Python :: 3.11
 Classifier: Programming Language :: Python :: 3.12
 Classifier: Operating System :: OS Independent
-Requires-Python: >=3.12.4
+Requires-Python: >=3.9
 Description-Content-Type: text/markdown
 Requires-Dist: psutil
 Requires-Dist: pandas
