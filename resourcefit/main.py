@@ -2,7 +2,7 @@ import psutil
 import subprocess
 import pandas as pd
 import requests
-import json
+import json as json_module
 import re
 import click
 import docker
@@ -284,7 +284,8 @@ def normalize_docker_stats(container_stats, memory_buffer_factor=1.5):
     cpu_usage_vcpus = (cpu_usage_percentage / 100.0) * cpu_count  # Estimate vCPUs needed
 
     return {
-        'mem_usage_gib': required_memory_gb,  # Use the buffered memory requirement with a minimum of 0.2 GiB
+        'mem_usage_gib': mem_usage_gb,  # Actual memory usage in GiB
+        'required_memory_gib': required_memory_gb,  # Buffered memory requirement in GiB
         'cpu_usage_vcpus': cpu_usage_vcpus
     }
 
@@ -337,8 +338,12 @@ def filter_ec2_instances(ec2_data, normalized_stats, total_disk_required_gb):
     # Drop rows with NaN values in 'Memory', 'vCPU', or 'Disk Space'
     ec2_data = ec2_data.dropna(subset=['Memory', 'vCPU', 'Disk Space'])
 
+    # Use actual memory usage (mem_usage_gib) for utilization checks, and apply the buffer for instance recommendation
+    mem_usage_gib = normalized_stats['mem_usage_gib']  # Actual memory usage in GiB
+    required_memory_gib = normalized_stats['required_memory_gib']  # Buffered memory requirement in GiB
+
     # Define minimum requirements for memory and CPU (buffered memory already applied)
-    min_memory_gib = max(normalized_stats['mem_usage_gib'], 0.2)  # Ensure at least 0.2 GiB minimum
+    min_memory_gib = max(required_memory_gib, 0.2)  # Ensure at least 0.2 GiB minimum
     cpu_buffer = max(normalized_stats['cpu_usage_vcpus'], 1)  # Ensure at least 1 vCPU
 
     # First filter by memory and CPU
@@ -347,8 +352,8 @@ def filter_ec2_instances(ec2_data, normalized_stats, total_disk_required_gb):
         (ec2_data['vCPU'] >= cpu_buffer)
     ]
 
-    # Check memory utilization: if memory usage is above 50%, select larger instances
-    memory_utilization = (normalized_stats['mem_usage_gib'] / min_memory_gib) * 100
+    # Check memory utilization: if memory usage (without buffer) is above 50%, select larger instances
+    memory_utilization = (mem_usage_gib / required_memory_gib) * 100
     if memory_utilization > 50:
         click.echo(f"Memory utilization is above 50% ({memory_utilization:.2f}%), increasing the memory requirement.")
         min_memory_gib *= 1.5  # Increase memory requirement by 50%
@@ -391,8 +396,6 @@ def filter_ec2_instances(ec2_data, normalized_stats, total_disk_required_gb):
 
     return filtered_instances
 
-
-
 def sort_by_cost(filtered_instances):
     """Sort EC2 instances by monthly price"""
     sorted_instances = filtered_instances.sort_values(by='priceMonthly')
@@ -417,13 +420,39 @@ def recommend_instance(container_stats, ec2_data, container_image_size_gb, ebs_p
     # Sort by monthly cost
     sorted_instances = sort_by_cost(filtered_instances)
 
-    return sorted_instances.head(3)
+    return sorted_instances
 
 ############################
 # Usage
 ############################
 
-def analyze_and_recommend():
+@click.command('-h', help="""
+ResourceFit is a CLI tool designed to analyze Docker container resource usage
+and recommend the most cost-effective Amazon Web Services (AWS) EC2 instances.
+It gathers real-time statistics from running Docker containers, fetches EC2 pricing data,
+and suggests EC2 instance types best suited for the container's memory, CPU,
+and storage requirements. It also supports exporting the recommendations to various formats.
+""")
+@click.option('-b', '--best', type=int, help="""
+Specify the index of the best EC2 instance option to return.
+For example, use '-b 1' to return the top recommendation based on pricing and resource fit.
+The index refers to the position of the instance in the sorted list of recommendations
+(1 being the best). You can combine this option with the '-j' flag to return
+the instance data in JSON format.""")
+@click.option('-j', '--json', is_flag=True, help="""
+Return instance data in JSON format. This option can be used with '-b' to
+return the specific instance details (such as vCPU, memory, price, etc.) as JSON.
+If no index is specified with '-b', it defaults to showing all recommendations in JSON format.""")
+@click.option('-e', '--export', type=click.Choice(['csv', 'xlsx', 'json']), help="""
+Export the EC2 instance recommendations to a file in the specified format.
+Supported formats are:
+- 'csv' for a comma-separated values file
+- 'xlsx' for an Excel spreadsheet
+- 'json' for a JSON file
+
+This option allows users to save and review the recommended instances later.
+For example, use '-e csv' to export the recommendations as a CSV file.""")
+def analyze_and_recommend(export, best, json):
     """Analyze container stats and recommend AWS instances."""
     # Step 1: List running Docker containers
     containers = list_containers()
@@ -457,7 +486,6 @@ def analyze_and_recommend():
 
     # Step 5: Fetch AWS EC2 pricing data
     click.echo("\nFetching AWS EC2 pricing data...")
-    region = 'US East (N. Virginia)'  # You can make this configurable if needed
     ec2_data = fetch_aws_pricing_data()
 
     # Step 6: Fetch AWS EBS pricing data
@@ -477,8 +505,28 @@ def analyze_and_recommend():
 
     # Step 10: Output the top 3 EC2 instance recommendations
     if not recommended_instances.empty:
+        recommended_instances=recommended_instances.head(3)
         click.echo("\nTop 3 EC2 Instance Recommendations:")
         click.echo(recommended_instances[['Instance Type', 'Memory', 'vCPU', 'Storage', 'priceMonthly']])
+
+        # Handle best instance and JSON output
+        if best and json:
+            if 1 <= best <= len(recommended_instances):
+                selected_instance = recommended_instances.iloc[best - 1]
+                click.echo(json_module.dumps(selected_instance.to_dict(), indent=4))
+            else:
+                click.echo("Invalid instance index. Please select a valid index.")
+
+        # Export to spreadsheet if option provided
+        if export:
+            filename = f"resourcefit_recommendations.{export}"
+            if export == 'csv':
+                recommended_instances.to_csv(filename, index=False)
+            elif export == 'xlsx':
+                recommended_instances.to_excel(filename, index=False)
+            elif export == 'json':
+                recommended_instances.to_json(filename, index=False)
+            click.echo(f"Recommendations exported to {filename}")
     else:
         click.echo("No EC2 instances could be recommended based on the container stats.")
 

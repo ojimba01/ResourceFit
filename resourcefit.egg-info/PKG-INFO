@@ -1,6 +1,6 @@
 Metadata-Version: 2.1
 Name: resourcefit
-Version: 0.1.2
+Version: 0.1.3
 Summary: CLI tool for analyzing Docker containers and recommending EC2 instances.
 Home-page: https://github.com/ojimba01/resourcefit
 Author: Olayinka Jimba
